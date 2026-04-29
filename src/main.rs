@@ -4,26 +4,13 @@ use futures::StreamExt;
 use libp2p::{
     Multiaddr, PeerId, SwarmBuilder,
     identity,
-    request_response::{self, Event, ProtocolSupport},
+    mdns,
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 
-use serde::{Deserialize, Serialize};
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PingRequest {
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PingResponse{
-    message: String,
-}
-
 #[derive(NetworkBehaviour)]
 struct MyBehaviour {
-    req_res: request_response::json::Behaviour<PingRequest, PingResponse>,
+    mdns: libp2p::mdns::tokio::Behaviour,
 }
 
 #[tokio::main]
@@ -42,14 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Local peerId: {}", local_peer_id);
 
     let behaviour = MyBehaviour {
-        req_res: request_response::json::Behaviour::new(
-            [(
-                libp2p::StreamProtocol::new("/belal/pingpong/1"),
-                ProtocolSupport::Full,
-            )],
-            request_response::Config::default(),
-        ),      
+        mdns: libp2p::mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?,
     };
+
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
     .with_tokio()
     .with_tcp(
@@ -60,32 +42,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_behaviour(|_| behaviour)?
     .build();
 
-    let mut sent_ping = false;
+    let port = args.get(1)
+        .expect("Missing port")
+        .parse::<u16>()
+        .expect("Invalid port");
 
-    match args[1].as_str() {
-        "listen" => {
-            let port = args
-            .get(2)
-            .expect("missing port")
-            .parse::<u16>()
-            .expect("Invalid port");
+    let dial = args.get(2)
+        .expect("missing dial")
+        .parse::<bool>()
+        .expect("missing dial");
+    
+    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+    swarm.listen_on(listen_addr.clone())?;
+    println!("Listening on port {}", port);
 
-        let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-        swarm.listen_on(listen_addr.clone())?;
-        println!("Listening mode on port {}", port);
-        }
-
-        "dial" => {
-            let addr: Multiaddr = args.get(2).expect("Missing multiAddr").parse()?;
-            println!("Dial mode to {}", addr);
-            swarm.dial(addr)?;
-        }
-
-        other => {
-            eprintln!("Unkwon mode: {}", other);
-            std::process::exit(1);
-        }
-    }
 
     loop {
         match swarm.select_next_some().await {
@@ -94,44 +64,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, ..} => {
                 println!("Connected to peer: {peer_id} via {endpoint:?}");
-                if args[1] == "dial" && !sent_ping {
-                    let req = PingRequest {
-                        message: "ping".to_string(),
-                    };
-                    let request_id = swarm.behaviour_mut().req_res.send_request(&peer_id, req);
-                    println!("Sent ping: {:?}", request_id);
-                    sent_ping = true;
-                }
             }
 
-            SwarmEvent::Behaviour(MyBehaviourEvent::ReqRes(event)) => match event {
-                request_response::Event::Message { peer, message, .. } => match message {
-                    request_response::Message::Request {request, channel, request_id} => {
-                        println!("Got request from: {}: {:?}, request_id: {:?}", peer, request, request_id);
-                        let response = PingResponse {
-                            message: "Pong".to_string(),
-                        };
-                        if let Err(err) = swarm.behaviour_mut().req_res.send_response(channel, response) {
-                            eprintln!("Faild to send response: {:?}", err);
-                        } else {
-                            println!("Sent pong");
+            SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(event)) => match event {
+                mdns::Event::Discovered(peers) => {
+                    println!("Discoverd {} new peers", {peers.len()});
+                    for (peer, addr) in peers {
+                        if peer == local_peer_id {
+                            continue;
+                        }
+                        println!("Discoverd peer: {:?}, addr: {:?}", peer, addr);
+                        if dial {
+                            println!("we will dial");
+                            if let Err(err) = swarm.dial(addr.clone()) {
+                                eprintln!("Failed to dial discovered peer {peer}: {err}");
+                            }
                         }
                     }
-                    request_response::Message::Response { request_id, response } => {
-                        println!("Got response for request: {:?}: {:?}", request_id, response);
+                },
+                mdns::Event::Expired(peers) => {
+                    println!("Expired {} new peers", {peers.len()});
+                    for (peer, addr) in &peers {
+                        println!("Expired peer: {:?}, addr: {:?}", peer, addr);
                     }
                 },
-                request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                    eprintln!("Outbound failure to peer: {}, for request: {:?}: {:?}", peer, request_id, error);
-                }
-                request_response::Event::InboundFailure { peer, request_id, error, .. } => {
-                    eprintln!("Inbound failure from peer: {} for request: {:?}: {:?}", peer, request_id, error);
-                }
-                request_response::Event::ResponseSent { peer, request_id, .. } => {
-                    println!("Response sent to: {}, for request {:?}", peer, request_id);
-                }
             }
-            
+
             event => {
                 println!("Swarm event: {event:?}");
             }
