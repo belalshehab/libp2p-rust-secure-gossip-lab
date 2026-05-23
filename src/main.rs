@@ -1,11 +1,9 @@
 use std::env;
 
 use futures::StreamExt;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{
-    Multiaddr, PeerId, SwarmBuilder,
-    identity,
-    mdns,
-    gossipsub,
+    Multiaddr, PeerId, SwarmBuilder, gossipsub, identity, mdns,
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 
@@ -13,7 +11,7 @@ use tokio::io::{self, AsyncBufReadExt};
 
 #[derive(NetworkBehaviour)]
 struct MyBehaviour {
-    mdns: mdns::tokio::Behaviour,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     gossipsub: gossipsub::Behaviour,
 }
 
@@ -26,6 +24,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  cargo run -- dial <multiaddr>");
         std::process::exit(1);
     }
+
+    let port = args
+        .get(1)
+        .expect("Missing port")
+        .parse::<u16>()
+        .expect("Invalid port");
+
+    let no_mdns = args.get(2).is_some_and(|arg| arg == "--no-mdns");
+
+    let manual_peer_addr: Option<Multiaddr> = if no_mdns {
+        Some(
+            args.get(3)
+                .expect("Missing multiaddr after --no-mdns")
+                .parse()?,
+        )
+    } else {
+        None
+    };
 
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
@@ -40,8 +56,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = gossipsub::IdentTopic::new("Chat");
     gossipsub.subscribe(&topic)?;
 
+    let mdns_behaviour = if no_mdns {
+        Toggle::from(None)
+    } else {
+        Toggle::from(Some(mdns::tokio::Behaviour::new(
+            mdns::Config::default(),
+            local_peer_id,
+        )?))
+    };
+
     let behaviour = MyBehaviour {
-        mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?,
+        mdns: mdns_behaviour,
         gossipsub,
     };
 
@@ -55,15 +80,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_behaviour(|_| behaviour)?
         .build();
 
-    let port = args
-        .get(1)
-        .expect("Missing port")
-        .parse::<u16>()
-        .expect("Invalid port");
-
     let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
     swarm.listen_on(listen_addr.clone())?;
     println!("Listening on port {}", port);
+    if let Some(addr) = manual_peer_addr {
+        println!("mdns disabled. Dialing manual peer: {addr}");
+
+        if let Err(err) = swarm.dial(addr.clone()) {
+            eprintln!("Failed to manually dial: {addr}: {err}");
+        }
+    }
 
     let mut stdin = io::BufReader::new(io::stdin()).lines();
 
@@ -109,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     println!("we will dial");
                                     if let Err(err) = swarm.dial(addr.clone()) {
                                         eprintln!("Failed to dial discovered peer {peer}: {err}");
-                                    } 
+                                    }
                                 } else {
                                     println!("we will wait for them to dial us");
                                 }
