@@ -1,27 +1,19 @@
 use std::env;
 
 use futures::StreamExt;
-use libp2p::swarm::behaviour::toggle::Toggle;
-use libp2p::{
-    Multiaddr, PeerId, SwarmBuilder, gossipsub, identity, mdns,
-    swarm::{NetworkBehaviour, SwarmEvent},
-};
+
+use libp2p::{Multiaddr, PeerId, identity};
+use libp2p_secure_gossip_lab::{build_swarm, handle_event};
 
 use tokio::io::{self, AsyncBufReadExt};
-
-#[derive(NetworkBehaviour)]
-struct MyBehaviour {
-    mdns: Toggle<mdns::tokio::Behaviour>,
-    gossipsub: gossipsub::Behaviour,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("usage:");
-        eprintln!("  cargo run -- listen <port>");
-        eprintln!("  cargo run -- dial <multiaddr>");
+        eprintln!("  cargo run -- <port>");
+        eprintln!("  cargo run -- <port> --no-mdns <multiaddr>");
         std::process::exit(1);
     }
 
@@ -34,54 +26,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_mdns = args.get(2).is_some_and(|arg| arg == "--no-mdns");
 
     let manual_peer_addr: Option<Multiaddr> = if no_mdns {
-        Some(
-            args.get(3)
-                .expect("Missing multiaddr after --no-mdns")
-                .parse()?,
-        )
+        args.get(3).map(|s| s.parse()).transpose()?
     } else {
         None
     };
 
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-
-    println!("Local peerId: {}", local_peer_id);
-
-    let mut gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
-        gossipsub::Config::default(),
-    )?;
-
-    let topic = gossipsub::IdentTopic::new("Chat");
-    gossipsub.subscribe(&topic)?;
-
-    let mdns_behaviour = if no_mdns {
-        Toggle::from(None)
-    } else {
-        Toggle::from(Some(mdns::tokio::Behaviour::new(
-            mdns::Config::default(),
-            local_peer_id,
-        )?))
-    };
-
-    let behaviour = MyBehaviour {
-        mdns: mdns_behaviour,
-        gossipsub,
-    };
-
-    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
-        .with_tokio()
-        .with_tcp(
-            Default::default(),
-            libp2p::noise::Config::new,
-            libp2p::yamux::Config::default,
-        )?
-        .with_behaviour(|_| behaviour)?
-        .build();
+    let (mut swarm, topic) = build_swarm(local_key, no_mdns)?;
 
     let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    swarm.listen_on(listen_addr.clone())?;
+    swarm.listen_on(listen_addr)?;
     println!("Listening on port {}", port);
     if let Some(addr) = manual_peer_addr {
         println!("mdns disabled. Dialing manual peer: {addr}");
@@ -106,67 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             event = swarm.select_next_some() => {
-                match event {
-                    SwarmEvent::NewListenAddr { address, ..} => {
-                        println!("Now listening on {}", address);
-                    }
-                    SwarmEvent::ConnectionEstablished { peer_id, endpoint, ..} => {
-                        println!("Connected to peer: {peer_id} via {endpoint:?}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                    }
-
-                    SwarmEvent::ConnectionClosed { peer_id, cause, num_established, ..} => {
-                        println!("Disconnected from peer: {peer_id}, cause: {cause:?}");
-                        if num_established == 0 {
-                            swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                        }
-                    }
-
-                    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(event)) => match event {
-                        mdns::Event::Discovered(peers) => {
-                            println!("Discoverd {} new peers", {peers.len()});
-                            for (peer, addr) in peers {
-                                if peer == local_peer_id {
-                                    continue;
-                                }
-                                println!("Discoverd peer: {:?}, addr: {:?}", peer, addr);
-                                let should_dial = local_peer_id.to_string() < peer.to_string();
-                                if should_dial {
-                                    println!("we will dial");
-                                    if let Err(err) = swarm.dial(addr.clone()) {
-                                        eprintln!("Failed to dial discovered peer {peer}: {err}");
-                                    }
-                                } else {
-                                    println!("we will wait for them to dial us");
-                                }
-                            }
-                        },
-                        mdns::Event::Expired(peers) => {
-                            println!("Expired {} new peers", {peers.len()});
-                            for (peer, addr) in &peers {
-                                println!("Expired peer: {:?}, addr: {:?}", peer, addr);
-                            }
-                        },
-                    }
-
-                    SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                        propagation_source,
-                        message_id,
-                        message,
-                    })) => {
-                        println!(
-                            "Got message from: {propagation_source}: '{}', with id: {message_id}",
-                            String::from_utf8_lossy(&message.data)
-                        );
-                    }
-
-                    event => {
-                        println!("Swarm event: {event:?}");
-                    }
-                }
+                handle_event(event, &mut swarm, local_peer_id);
             }
         }
     }
 
+    #[allow(unreachable_code)]
     Ok(())
 }
