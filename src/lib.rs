@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use libp2p::gossipsub::{Message, MessageId};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{
@@ -13,8 +13,8 @@ use libp2p::{
 
 use crate::message::SignedChatMessage;
 
-pub mod message;
 pub mod identity;
+pub mod message;
 
 #[derive(NetworkBehaviour)]
 pub struct SecureGossipBehaviour {
@@ -28,9 +28,14 @@ pub fn build_swarm(
 ) -> Result<(Swarm<SecureGossipBehaviour>, gossipsub::IdentTopic), Box<dyn std::error::Error>> {
     let local_peer_id = PeerId::from(local_key.public());
 
+    let config = gossipsub::ConfigBuilder::default()
+        .validate_messages()
+        .build()
+        .expect("valid gossipsub config");
+
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
-        gossipsub::Config::default(),
+        config,
     )?;
 
     let topic = gossipsub::IdentTopic::new("secure-gossip-lab/v1/chat");
@@ -65,7 +70,7 @@ pub fn build_swarm(
 pub fn handle_event(
     event: SwarmEvent<SecureGossipBehaviourEvent>,
     swarm: &mut Swarm<SecureGossipBehaviour>,
-    local_peer_id: PeerId,
+    local_peer_id: &PeerId,
     trusted_keys: &HashMap<String, VerifyingKey>,
 ) {
     match event {
@@ -105,7 +110,15 @@ pub fn handle_event(
                 message,
             },
         )) => {
-            handle_gossipsub_message(propagation_source, message_id, message, trusted_keys);
+            let acceptance =
+                handle_gossipsub_message(&propagation_source, &message_id, message, trusted_keys);
+            if !swarm
+                .behaviour_mut()
+                .gossipsub
+                .report_message_validation_result(&message_id, &propagation_source, acceptance)
+            {
+                eprintln!("Failed to report message validation result: message_id not found");
+            }
         }
 
         event => {
@@ -117,13 +130,13 @@ pub fn handle_event(
 fn handle_mdns(
     event: mdns::Event,
     swarm: &mut Swarm<SecureGossipBehaviour>,
-    local_peer_id: PeerId,
+    local_peer_id: &PeerId,
 ) {
     match event {
         mdns::Event::Discovered(peers) => {
             println!("Discovered {} new peers", peers.len());
             for (peer, addr) in peers {
-                if peer == local_peer_id {
+                if peer == *local_peer_id {
                     continue;
                 }
                 println!("Discovered peer: {:?}, addr: {:?}", peer, addr);
@@ -131,12 +144,12 @@ fn handle_mdns(
                 // This is only for the experiment; production code should use proper connection management.
                 let should_dial = local_peer_id.to_string() < peer.to_string();
                 if should_dial {
-                    println!("we will dial");
+                    println!("Dialing discovered peer.");
                     if let Err(err) = swarm.dial(addr.clone()) {
                         eprintln!("Failed to dial discovered peer {peer}: {err}");
                     }
                 } else {
-                    println!("we will wait for them to dial us");
+                    println!("Waiting for discovered peer to dial us.");
                 }
             }
         }
@@ -150,23 +163,39 @@ fn handle_mdns(
 }
 
 fn handle_gossipsub_message(
-    propagation_source: PeerId,
-    message_id: MessageId,
+    propagation_source: &PeerId,
+    message_id: &MessageId,
     message: Message,
     trusted_keys: &HashMap<String, VerifyingKey>,
-) {
+) -> gossipsub::MessageAcceptance {
     match serde_json::from_slice::<SignedChatMessage>(&message.data) {
         Ok(msg) => {
             if msg.signature.is_empty() {
-                println!("From: {} (anonymous): [{}] '{}'", msg.sender_id, message_id, msg.payload);
+                eprintln!(
+                    "REJECTED message from '{}': unsigned messages not allowed",
+                    msg.sender_id
+                );
+                gossipsub::MessageAcceptance::Reject
             } else {
                 match verify_message(&msg, trusted_keys) {
-                    Ok(()) => println!("From: {} (verified ✓): [{}] '{}'", msg.sender_id, message_id, msg.payload),
-                    Err(reason) => eprintln!("REJECTED message from '{}': {}", msg.sender_id, reason),
+                    Ok(()) => {
+                        println!(
+                            "From: {} (verified ✓): [{}] '{}'",
+                            msg.sender_id, message_id, msg.payload
+                        );
+                        gossipsub::MessageAcceptance::Accept
+                    }
+                    Err(reason) => {
+                        eprintln!("REJECTED message from '{}': {}", msg.sender_id, reason);
+                        gossipsub::MessageAcceptance::Reject
+                    }
                 }
             }
         }
-        Err(_) => println!("From {propagation_source}: [non-envelope message, ignoring]"),
+        Err(_) => {
+            println!("From {propagation_source}: [non-envelope message, ignoring]");
+            gossipsub::MessageAcceptance::Ignore
+        }
     }
 }
 

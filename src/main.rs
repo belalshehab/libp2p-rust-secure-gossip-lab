@@ -2,12 +2,14 @@ use std::env;
 
 use futures::StreamExt;
 
-use libp2p::{Multiaddr, PeerId, identity};
-use libp2p_secure_gossip_lab::identity::{generate_demo_keys_file, load_keys_file, load_node_identity, load_trusted_keys};
-use libp2p_secure_gossip_lab::{build_swarm, handle_event};
-use libp2p_secure_gossip_lab::message::{self, signing_payload};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
+use libp2p::{Multiaddr, PeerId, identity};
+use libp2p_secure_gossip_lab::identity::{
+    generate_demo_keys_file, load_keys_file, load_node_identity, load_trusted_keys,
+};
+use libp2p_secure_gossip_lab::message::{self, signing_payload};
+use libp2p_secure_gossip_lab::{build_swarm, handle_event};
 use tokio::io::{self, AsyncBufReadExt};
 
 #[tokio::main]
@@ -31,7 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<u16>()
         .expect("Invalid port");
 
-    let node_id: Option<String> = args.windows(2)
+    let node_id: Option<String> = args
+        .windows(2)
         .find(|w| w[0] == "--node-id")
         .map(|w| w[1].clone());
 
@@ -96,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             event = swarm.select_next_some() => {
-                handle_event(event, &mut swarm, local_peer_id, &trusted_keys);
+                handle_event(event, &mut swarm, &local_peer_id, &trusted_keys);
             }
         }
     }
