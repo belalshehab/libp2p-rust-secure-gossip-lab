@@ -7,6 +7,11 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 
+use crate::message::SignedChatMessage;
+
+pub mod message;
+pub mod identity;
+
 #[derive(NetworkBehaviour)]
 pub struct SecureGossipBehaviour {
     pub mdns: Toggle<mdns::tokio::Behaviour>,
@@ -140,8 +145,8 @@ fn handle_mdns(
 }
 
 fn handle_gossipsub_message(propagation_source: PeerId, message_id: MessageId, message: Message) {
-    println!(
-        "Got message from: {propagation_source}: '{}', with id: {message_id}",
-        String::from_utf8_lossy(&message.data)
-    );
+    match serde_json::from_slice::<SignedChatMessage>(&message.data) {
+        Ok(msg) => println!("From: {}: [{}] '{}'", msg.sender_id, message_id, msg.payload),
+        Err(_) => println!("From {propagation_source}: [non-envelope messafe, ignoring]"),
+    }
 }
