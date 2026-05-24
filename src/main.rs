@@ -3,7 +3,7 @@ use std::env;
 use futures::StreamExt;
 
 use libp2p::{Multiaddr, PeerId, identity};
-use libp2p_secure_gossip_lab::identity::{generate_demo_keys_file, load_keys_file, load_node_identity};
+use libp2p_secure_gossip_lab::identity::{generate_demo_keys_file, load_keys_file, load_node_identity, load_trusted_keys};
 use libp2p_secure_gossip_lab::{build_swarm, handle_event};
 use libp2p_secure_gossip_lab::message::{self, signing_payload};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -44,8 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let keys = load_keys_file("keys/demo_keys.json")?;
+    let trusted_keys = load_trusted_keys(&keys)?;
+
     let node_identity = if let Some(ref id) = node_id {
-        let keys = load_keys_file("keys/demo_keys.json")?;
         Some(load_node_identity(&keys, id)?)
     } else {
         None
@@ -94,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             event = swarm.select_next_some() => {
-                handle_event(event, &mut swarm, local_peer_id);
+                handle_event(event, &mut swarm, local_peer_id, &trusted_keys);
             }
         }
     }

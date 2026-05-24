@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 use libp2p::gossipsub::{Message, MessageId};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{
@@ -62,6 +66,7 @@ pub fn handle_event(
     event: SwarmEvent<SecureGossipBehaviourEvent>,
     swarm: &mut Swarm<SecureGossipBehaviour>,
     local_peer_id: PeerId,
+    trusted_keys: &HashMap<String, VerifyingKey>,
 ) {
     match event {
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -100,7 +105,7 @@ pub fn handle_event(
                 message,
             },
         )) => {
-            handle_gossipsub_message(propagation_source, message_id, message);
+            handle_gossipsub_message(propagation_source, message_id, message, trusted_keys);
         }
 
         event => {
@@ -144,9 +149,47 @@ fn handle_mdns(
     }
 }
 
-fn handle_gossipsub_message(propagation_source: PeerId, message_id: MessageId, message: Message) {
+fn handle_gossipsub_message(
+    propagation_source: PeerId,
+    message_id: MessageId,
+    message: Message,
+    trusted_keys: &HashMap<String, VerifyingKey>,
+) {
     match serde_json::from_slice::<SignedChatMessage>(&message.data) {
-        Ok(msg) => println!("From: {}: [{}] '{}'", msg.sender_id, message_id, msg.payload),
-        Err(_) => println!("From {propagation_source}: [non-envelope messafe, ignoring]"),
+        Ok(msg) => {
+            if msg.signature.is_empty() {
+                println!("From: {} (anonymous): [{}] '{}'", msg.sender_id, message_id, msg.payload);
+            } else {
+                match verify_message(&msg, trusted_keys) {
+                    Ok(()) => println!("From: {} (verified ✓): [{}] '{}'", msg.sender_id, message_id, msg.payload),
+                    Err(reason) => eprintln!("REJECTED message from '{}': {}", msg.sender_id, reason),
+                }
+            }
+        }
+        Err(_) => println!("From {propagation_source}: [non-envelope message, ignoring]"),
     }
+}
+
+fn verify_message(
+    msg: &SignedChatMessage,
+    trusted_keys: &HashMap<String, VerifyingKey>,
+) -> Result<(), String> {
+    let verifying_key = trusted_keys
+        .get(&msg.sender_id)
+        .ok_or_else(|| format!("unknown sender '{}'", msg.sender_id))?;
+
+    let sig_bytes = STANDARD
+        .decode(&msg.signature)
+        .map_err(|e| format!("invalid base64: {e}"))?;
+
+    let sig_array: [u8; 64] = sig_bytes
+        .try_into()
+        .map_err(|_| "signature has wrong length".to_string())?;
+
+    let signature = Signature::from_bytes(&sig_array);
+    let payload = crate::message::signing_payload(&msg.sender_id, &msg.payload);
+
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|e| format!("bad signature: {e}"))
 }
