@@ -8,9 +8,11 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
 };
 
+use crate::error::AppError;
 use crate::message::SignedChatMessage;
 use crate::validator::Validator;
 
+pub mod error;
 pub mod identity;
 pub mod message;
 pub mod validator;
@@ -24,7 +26,7 @@ pub struct SecureGossipBehaviour {
 pub fn build_swarm(
     local_key: Keypair,
     no_mdns: bool,
-) -> Result<(Swarm<SecureGossipBehaviour>, gossipsub::IdentTopic), Box<dyn std::error::Error>> {
+) -> Result<(Swarm<SecureGossipBehaviour>, gossipsub::IdentTopic), AppError> {
     let local_peer_id = PeerId::from(local_key.public());
 
     let config = gossipsub::ConfigBuilder::default()
@@ -35,10 +37,13 @@ pub fn build_swarm(
     let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         config,
-    )?;
+    )
+    .map_err(|e| AppError::Libp2p(e.to_string()))?;
 
     let topic = gossipsub::IdentTopic::new("secure-gossip-lab/v1/chat");
-    gossipsub.subscribe(&topic)?;
+    gossipsub
+        .subscribe(&topic)
+        .map_err(|e| AppError::Libp2p(e.to_string()))?;
 
     let mdns_behaviour = if no_mdns {
         Toggle::from(None)
@@ -60,8 +65,10 @@ pub fn build_swarm(
             Default::default(),
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
-        )?
-        .with_behaviour(|_| behaviour)?
+        )
+        .map_err(|e| AppError::Libp2p(e.to_string()))?
+        .with_behaviour(|_| behaviour)
+        .map_err(|e| AppError::Libp2p(e.to_string()))?
         .build();
     Ok((swarm, topic))
 }

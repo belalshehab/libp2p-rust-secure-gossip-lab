@@ -6,6 +6,8 @@ use ed25519_dalek::VerifyingKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
+
 #[derive(Serialize, Deserialize)]
 pub struct NodeEntry {
     pub public_key: String,  // base64-encoded 32 bytes
@@ -22,44 +24,39 @@ pub struct NodeIdentity {
     pub signing_key: SigningKey,
 }
 
-pub fn load_keys_file(path: &str) -> Result<KeysFile, Box<dyn std::error::Error>> {
+pub fn load_keys_file(path: &str) -> Result<KeysFile, AppError> {
     let text = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
 }
 
-pub fn load_node_identity(
-    keys: &KeysFile,
-    node_id: &str,
-) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
+pub fn load_node_identity(keys: &KeysFile, node_id: &str) -> Result<NodeIdentity, AppError> {
     let entry = keys
         .nodes
         .get(node_id)
-        .ok_or_else(|| format!("node_id '{node_id}' not found in keys fuke"))?;
+        .ok_or_else(|| AppError::NodeNotFound(node_id.to_string()))?;
     let bytes = STANDARD.decode(&entry.private_key)?;
     let arr: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| "private key must be 32 bytes")?;
+        .map_err(|_| AppError::InvalidKey("private key must be 32 bytes".to_string()))?;
     Ok(NodeIdentity {
         node_id: node_id.to_string(),
         signing_key: SigningKey::from_bytes(&arr),
     })
 }
 
-pub fn load_trusted_keys(
-    keys: &KeysFile,
-) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error>> {
+pub fn load_trusted_keys(keys: &KeysFile) -> Result<HashMap<String, VerifyingKey>, AppError> {
     let mut map = HashMap::new();
     for (id, b64) in &keys.trusted_senders {
         let bytes = STANDARD.decode(b64)?;
         let arr: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| "public key must be 32 bytes")?;
+            .map_err(|_| AppError::InvalidKey("public key must be 32 bytes".to_string()))?;
         map.insert(id.clone(), VerifyingKey::from_bytes(&arr)?);
     }
     Ok(map)
 }
 
-pub fn generate_demo_keys_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn generate_demo_keys_file(path: &str) -> Result<(), AppError> {
     let node_ids = ["node1", "node2", "node3"];
     let mut nodes = HashMap::new();
     let mut trusted_senders = HashMap::new();

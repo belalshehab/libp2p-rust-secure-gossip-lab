@@ -5,6 +5,7 @@ use futures::StreamExt;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
 use libp2p::{Multiaddr, PeerId, identity};
+use libp2p_secure_gossip_lab::error::AppError;
 use libp2p_secure_gossip_lab::identity::{
     generate_demo_keys_file, load_keys_file, load_node_identity, load_trusted_keys,
 };
@@ -14,7 +15,7 @@ use libp2p_secure_gossip_lab::{build_swarm, handle_event};
 use tokio::io::{self, AsyncBufReadExt};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), AppError> {
     if !std::path::Path::new("keys/demo_keys.json").exists() {
         generate_demo_keys_file("keys/demo_keys.json")?;
     }
@@ -43,7 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_mdns = no_mdns_pos.is_some();
 
     let manual_peer_addr: Option<Multiaddr> = if let Some(pos) = no_mdns_pos {
-        args.get(pos + 1).map(|s| s.parse()).transpose()?
+        args.get(pos + 1)
+            .map(|s| {
+                s.parse::<Multiaddr>()
+                    .map_err(|e| AppError::Libp2p(e.to_string()))
+            })
+            .transpose()?
     } else {
         None
     };
@@ -64,8 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_peer_id = PeerId::from(local_key.public());
     let (mut swarm, topic) = build_swarm(local_key, no_mdns)?;
 
-    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    swarm.listen_on(listen_addr)?;
+    let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}")
+        .parse()
+        .map_err(|e: libp2p::multiaddr::Error| AppError::Libp2p(e.to_string()))?;
+    swarm
+        .listen_on(listen_addr)
+        .map_err(|e| AppError::Libp2p(e.to_string()))?;
     println!("Listening on port {}", port);
     if let Some(addr) = manual_peer_addr {
         println!("mdns disabled. Dialing manual peer: {addr}");
