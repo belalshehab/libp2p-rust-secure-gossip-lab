@@ -9,6 +9,7 @@ use libp2p_secure_gossip_lab::identity::{
     generate_demo_keys_file, load_keys_file, load_node_identity, load_trusted_keys,
 };
 use libp2p_secure_gossip_lab::message::{self, signing_payload};
+use libp2p_secure_gossip_lab::validator::Validator;
 use libp2p_secure_gossip_lab::{build_swarm, handle_event};
 use tokio::io::{self, AsyncBufReadExt};
 
@@ -48,9 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let keys = load_keys_file("keys/demo_keys.json")?;
-    let trusted_keys = load_trusted_keys(&keys)?;
+    let mut validator = Validator::default();
+    for (id, key) in load_trusted_keys(&keys)? {
+        validator.add_trusted_peer(&id, key);
+    }
 
-    let node_identity = if let Some(ref id) = node_id {
+    let node_identity = if let Some(id) = &node_id {
         Some(load_node_identity(&keys, id)?)
     } else {
         None
@@ -79,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let line = line?;
                 if let Some(line) = line {
-                    let (sender_id, signature) = if let Some(ref identity) = node_identity {
+                    let (sender_id, signature) = if let Some(identity) = &node_identity {
                         let sig_bytes = identity.signing_key.sign(&signing_payload(&identity.node_id, &line));
                         (identity.node_id.clone(), STANDARD.encode(sig_bytes.to_bytes()))
                     } else {
@@ -99,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             event = swarm.select_next_some() => {
-                handle_event(event, &mut swarm, &local_peer_id, &trusted_keys);
+                handle_event(event, &mut swarm, &local_peer_id, &validator);
             }
         }
     }
